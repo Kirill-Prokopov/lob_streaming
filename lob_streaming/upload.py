@@ -60,6 +60,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--out-dir", required=True)
     parser.add_argument("--secrets-path", required=True)
+    parser.add_argument("--remote-root", default="app:/orderbook")
     args = parser.parse_args()
-    for path in upload_closed_files(args.out_dir, args.secrets_path):
+    for path in upload_closed_files(args.out_dir, args.secrets_path, remote_root=args.remote_root):
         print(f"uploaded: {path}", flush=True)
