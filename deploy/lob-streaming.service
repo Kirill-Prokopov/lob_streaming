@@ -1,0 +1,14 @@
+[Unit]
+Description=LOB streaming recorder (MXZ6@RTSX, MMZ6@RTSX)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root/lob_streaming
+ExecStart=/root/.venv/bin/python -m lob_streaming.orderbook MXZ6@RTSX MMZ6@RTSX --out-dir data/orderbook --secrets-file .secrets
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

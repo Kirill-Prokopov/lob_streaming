@@ -1,0 +1,9 @@
+[Unit]
+Description=Nightly upload of closed lob_streaming recordings (02:00 Moscow time -- mid exchange-closed window)
+
+[Timer]
+OnCalendar=*-*-* 02:00:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

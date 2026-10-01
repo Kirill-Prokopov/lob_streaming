@@ -1,0 +1,9 @@
+[Unit]
+Description=Upload closed lob_streaming recordings to Yandex Disk
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/root/lob_streaming
+ExecStart=/root/.venv/bin/python -m lob_streaming.upload --out-dir data/orderbook
