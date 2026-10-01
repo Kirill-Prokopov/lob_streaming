@@ -5,8 +5,8 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=/root/lob_streaming
-ExecStart=/root/.venv/bin/python -m lob_streaming.orderbook MXZ6@RTSX MMZ6@RTSX --out-dir data/orderbook --secrets-file .secrets
+WorkingDirectory=/root/Code/lob_streaming
+ExecStart=/root/Code/.venv_lob_streaming/bin/python -m lob_streaming.orderbook MXZ6@RTSX MMZ6@RTSX --out-dir '/root/Code/lob_data' --secrets-file '/root/Code/.secrets_obs'
 Restart=always
 RestartSec=5
 
