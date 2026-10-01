@@ -16,6 +16,7 @@ from .schedule import CLOSE_END, CLOSE_START, is_exchange_closed, trading_date
 
 def upload_closed_files(
     out_dir: str | Path,
+    secrets_path: str | Path,
     remote_root: str = "app:/orderbook",
     token_name: str = "Y_DISK_OBS_KEY",
     overwrite: bool = True,
@@ -26,8 +27,11 @@ def upload_closed_files(
     which may still be open for writing. Refuses to run outside the
     exchange-closed window unless `force=True`. `overwrite=True` (default)
     replaces any previous upload of the same file in place, rather than
-    piling up numbered duplicates on repeat runs. Returns the list of
-    remote paths uploaded to.
+    piling up numbered duplicates on repeat runs. `secrets_path` is the
+    file `token_name` is read from -- passed through to `y_disk.load_token`
+    explicitly rather than relying on its hardcoded default
+    (`~/Code/.secrets`), since that's rarely where this project's own
+    secrets actually live. Returns the list of remote paths uploaded to.
     """
     if not force and not is_exchange_closed():
         raise RuntimeError(
@@ -37,7 +41,7 @@ def upload_closed_files(
 
     from y_disk import YandexDiskClient, load_token  # optional dependency, imported lazily
 
-    client = YandexDiskClient(load_token(token_name))
+    client = YandexDiskClient(load_token(token_name, secrets_path))
     today = trading_date().isoformat()
 
     uploaded = []
@@ -55,6 +59,7 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--out-dir", required=True)
+    parser.add_argument("--secrets-path", required=True)
     args = parser.parse_args()
-    for path in upload_closed_files(args.out_dir):
+    for path in upload_closed_files(args.out_dir, args.secrets_path):
         print(f"uploaded: {path}", flush=True)

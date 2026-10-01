@@ -6,4 +6,4 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 WorkingDirectory=/root/lob_streaming
-ExecStart=/root/.venv/bin/python -m lob_streaming.upload --out-dir data/orderbook
+ExecStart=/root/.venv/bin/python -m lob_streaming.upload --out-dir data/orderbook --secrets-path .secrets
