@@ -9,10 +9,17 @@ continuously. That's what `record_trades` does.
 Each push is stored as one JSON line `{symbol, receipt_time, trades: [...]}`
 (same "keep a push's items grouped" layout as the order-book recorder), with
 the same per-symbol, trading-day-rotated file naming, so the two recordings
-line up file-for-file. Every trade carries its own `is_data_snapshot` flag:
-right after (re)subscribing the server may replay recent trades flagged as a
-snapshot, so downstream code should de-duplicate on `(symbol, trade_id)`
-rather than assume each trade appears exactly once.
+line up file-for-file. Every trade carries its own `is_data_snapshot` flag,
+and the recording is deliberately raw -- downstream code must clean it up:
+
+* The server re-sends the latest trade flagged `is_data_snapshot=True`: as
+  the very first push after (re)subscribing (its live copy then arrives a few
+  pushes later) and also periodically mid-stream, a second or two after the
+  trade was delivered live. So de-duplicate on `(symbol, trade_id)`; never
+  assume each trade appears exactly once.
+* Because of that first snapshot, a file is not strictly ordered by
+  `exchange_time` right after a (re)subscribe. `trade_id` increases
+  monotonically, so sort on it to restore the true order.
 
 Reconnect policy is the same as `orderbook.arecord_orderbook`: only on an
 actual stream error, never on a timer.
