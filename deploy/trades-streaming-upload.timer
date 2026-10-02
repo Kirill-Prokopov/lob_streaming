@@ -1,0 +1,9 @@
+[Unit]
+Description=Nightly upload of closed trades recordings (02:35 Moscow time -- mid exchange-closed window, offset from the 02:05 order-book upload)
+
+[Timer]
+OnCalendar=*-*-* 02:35:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

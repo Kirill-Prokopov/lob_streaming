@@ -1,0 +1,9 @@
+[Unit]
+Description=Compress, upload and clean up closed trades recordings (Yandex Disk)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/root/Code/lob_streaming
+ExecStart=/root/Code/.venv_lob_streaming/bin/python -m lob_streaming.upload --out-dir '/root/Code/trades_data' --secrets-path '/root/Code/.secrets_obs' --remote-root 'app:/trades'

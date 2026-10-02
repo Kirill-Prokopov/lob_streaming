@@ -1,5 +1,5 @@
 [Unit]
-Description=Upload closed lob_streaming recordings (batch 2) to Yandex Disk
+Description=Compress, upload and clean up closed lob_streaming recordings (batch 2, Yandex Disk)
 After=network-online.target
 Wants=network-online.target
 
