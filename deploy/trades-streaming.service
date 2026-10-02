@@ -1,0 +1,14 @@
+[Unit]
+Description=Trades streaming recorder (IMOEX/mini, USD/EUR/CNY-RUB, GOLD, Brent dated + perpetual futures)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root/Code/lob_streaming
+ExecStart=/root/Code/.venv_lob_streaming/bin/python -m lob_streaming.trades MXZ6@RTSX MXH7@RTSX MXM7@RTSX MMZ6@RTSX MMH7@RTSX MMM7@RTSX SiZ6@RTSX SiH7@RTSX SiM7@RTSX EuZ6@RTSX EuH7@RTSX EuM7@RTSX CRZ6@RTSX CRH7@RTSX CRM7@RTSX GDZ6@RTSX GDH7@RTSX GDM7@RTSX BRX6@RTSX BRZ6@RTSX BRF7@RTSX IMOEXF@RTSX USDRUBF@RTSX EURRUBF@RTSX CNYRUBF@RTSX GLDRUBF@RTSX --out-dir '/root/Code/trades_data' --secrets-file '/root/Code/.secrets_obs'
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
