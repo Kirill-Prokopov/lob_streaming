@@ -2,12 +2,11 @@
 no network, no credentials. The point of most of them: a local raw file may only
 ever be deleted after a verified remote copy exists. Run with: python -m pytest tests"""
 import hashlib
-import io
 import os
-import zipfile
 from pathlib import Path
 
 import pytest
+from compression import zstd
 from y_disk import DiskItem, ResourceNotFoundError
 
 from lob_streaming import upload
@@ -16,6 +15,7 @@ from lob_streaming.upload import UploadFailed, upload_closed_files
 
 OLD_DAY = "2020-01-02"
 PAYLOAD = b'{"symbol": "MXZ6@RTSX", "rows": []}\n' * 5000
+ZSTD_MAGIC = bytes.fromhex("28b52ffd")
 
 
 class FakeClient:
@@ -74,27 +74,31 @@ def _run(out_dir, client, **kw):
     return upload_closed_files(out_dir, "unused-secrets", remote_root="app:/root", client=client, **kw)
 
 
-def test_happy_path_uploads_a_valid_zip_and_deletes_local_files(tmp_path):
+def test_happy_path_uploads_a_valid_zst_and_deletes_local_files(tmp_path):
     src = _make(tmp_path, "MXZ6_RTSX", OLD_DAY)
     client = FakeClient()
 
-    assert _run(tmp_path, client) == [f"app:/root/MXZ6_RTSX/{OLD_DAY}.jsonl.zip"]
+    assert _run(tmp_path, client) == [f"app:/root/MXZ6_RTSX/{OLD_DAY}.jsonl.zst"]
 
-    remote = client.files[f"app:/root/MXZ6_RTSX/{OLD_DAY}.jsonl.zip"]
-    with zipfile.ZipFile(io.BytesIO(remote)) as zf:  # a plain, standard ZIP: any OS can open it
-        assert zf.namelist() == [f"{OLD_DAY}.jsonl"]
-        assert zf.getinfo(f"{OLD_DAY}.jsonl").compress_type == zipfile.ZIP_DEFLATED
-        assert zf.read(f"{OLD_DAY}.jsonl") == PAYLOAD
+    remote = client.files[f"app:/root/MXZ6_RTSX/{OLD_DAY}.jsonl.zst"]
+    assert remote.startswith(ZSTD_MAGIC)  # a standard zstd frame: `zstd -d` and any zstd library can read it
+    assert zstd.decompress(remote) == PAYLOAD
     assert len(remote) < len(PAYLOAD) / 10  # actually compressed
     assert not src.exists()
-    assert list(tmp_path.rglob("*.zip*")) == []  # no archive or .part left behind
+    assert list(tmp_path.rglob("*.zst*")) == []  # no archive or .part left behind
+
+
+def test_archive_carries_a_content_checksum(tmp_path):
+    zst_path = upload.compress_to_zst(_make(tmp_path, "A_RTSX", OLD_DAY))
+    frame_header_descriptor = zst_path.read_bytes()[4]
+    assert frame_header_descriptor & 0b100, "zstd frame should carry an xxh64 content checksum"
 
 
 def test_only_compressed_data_is_ever_uploaded(tmp_path):
     _make(tmp_path, "A_RTSX", OLD_DAY)
     client = FakeClient()
     _run(tmp_path, client)
-    assert all(p.endswith(".jsonl.zip") for p in client.files)
+    assert all(p.endswith(".jsonl.zst") for p in client.files)
 
 
 def test_todays_file_is_never_touched(tmp_path):
@@ -113,7 +117,7 @@ def test_recently_modified_file_is_skipped(tmp_path):
 
 def test_damaged_upload_keeps_the_local_file_and_fails_the_run(tmp_path):
     src = _make(tmp_path, "A_RTSX", OLD_DAY)
-    remote = f"app:/root/A_RTSX/{OLD_DAY}.jsonl.zip"
+    remote = f"app:/root/A_RTSX/{OLD_DAY}.jsonl.zst"
     client = FakeClient(truncate_paths=[remote])
 
     with pytest.raises(UploadFailed):
@@ -121,19 +125,19 @@ def test_damaged_upload_keeps_the_local_file_and_fails_the_run(tmp_path):
 
     assert src.read_bytes() == PAYLOAD
     assert len(client.upload_calls) == upload.UPLOAD_ATTEMPTS  # retried before giving up
-    assert list(tmp_path.rglob("*.zip*")) == []
+    assert list(tmp_path.rglob("*.zst*")) == []
 
 
 def test_archive_that_does_not_round_trip_is_never_uploaded(tmp_path, monkeypatch):
     src = _make(tmp_path, "A_RTSX", OLD_DAY)
-    real_compress = upload.compress_to_zip
+    real_compress = upload.compress_to_zst
 
     def damaged_compress(path):  # e.g. the disk filled up mid-write
-        zip_path = real_compress(path)
-        zip_path.write_bytes(zip_path.read_bytes()[:-50])
-        return zip_path
+        zst_path = real_compress(path)
+        zst_path.write_bytes(zst_path.read_bytes()[:-50])
+        return zst_path
 
-    monkeypatch.setattr(upload, "compress_to_zip", damaged_compress)
+    monkeypatch.setattr(upload, "compress_to_zst", damaged_compress)
     client = FakeClient()
 
     with pytest.raises(UploadFailed):
@@ -141,13 +145,13 @@ def test_archive_that_does_not_round_trip_is_never_uploaded(tmp_path, monkeypatc
 
     assert src.read_bytes() == PAYLOAD
     assert client.upload_calls == []  # never even sent
-    assert list(tmp_path.rglob("*.zip*")) == []
+    assert list(tmp_path.rglob("*.zst*")) == []
 
 
 def test_one_bad_file_does_not_block_the_others(tmp_path):
     bad = _make(tmp_path, "BAD_RTSX", OLD_DAY)
     good = _make(tmp_path, "GOOD_RTSX", OLD_DAY)
-    client = FakeClient(truncate_paths=[f"app:/root/BAD_RTSX/{OLD_DAY}.jsonl.zip"])
+    client = FakeClient(truncate_paths=[f"app:/root/BAD_RTSX/{OLD_DAY}.jsonl.zst"])
 
     with pytest.raises(UploadFailed, match="BAD_RTSX"):
         _run(tmp_path, client)
@@ -184,14 +188,14 @@ def test_file_that_grows_during_processing_is_kept(tmp_path):
 
 def test_dry_run_changes_nothing(tmp_path):
     src = _make(tmp_path, "A_RTSX", OLD_DAY)
-    assert _run(tmp_path, None, dry_run=True) == [f"app:/root/A_RTSX/{OLD_DAY}.jsonl.zip"]
-    assert src.read_bytes() == PAYLOAD and list(tmp_path.rglob("*.zip*")) == []
+    assert _run(tmp_path, None, dry_run=True) == [f"app:/root/A_RTSX/{OLD_DAY}.jsonl.zst"]
+    assert src.read_bytes() == PAYLOAD and list(tmp_path.rglob("*.zst*")) == []
 
 
 def test_stale_part_file_from_a_crashed_run_is_removed(tmp_path):
     _make(tmp_path, "A_RTSX", OLD_DAY)
-    stale = tmp_path / "A_RTSX" / f"{OLD_DAY}.jsonl.zip.part"
-    stale.write_bytes(b"half a zip")
+    stale = tmp_path / "A_RTSX" / f"{OLD_DAY}.jsonl.zst.part"
+    stale.write_bytes(b"half an archive")
     _run(tmp_path, FakeClient())
     assert not stale.exists()
 
@@ -205,27 +209,18 @@ def test_refuses_to_run_outside_the_closed_window_unless_forced(tmp_path, monkey
     assert len(_run(tmp_path, FakeClient(), force=True)) == 1
 
 
-def test_client_is_built_with_a_timeout_long_enough_for_yandex_to_process_big_archives(tmp_path, monkeypatch):
-    seen = {}
-
-    class SpyClient:
-        def __init__(self, token, timeout=None):
-            seen["timeout"] = timeout
-
-    monkeypatch.setattr("y_disk.YandexDiskClient", SpyClient)
-    monkeypatch.setattr("y_disk.load_token", lambda name, path: "token")
-    (tmp_path / "A_RTSX").mkdir()
-
-    upload_closed_files(tmp_path, "unused-secrets", force=True)  # builds the real-path client; nothing to upload
-
-    assert seen["timeout"] == upload.UPLOAD_TIMEOUT_S >= 600  # the library default (60 s) failed on 280+ MB days
-
-
-def test_zip_matches_source_rejects_wrong_content_and_damage(tmp_path):
+def test_zst_matches_source_rejects_wrong_content_truncation_and_bit_flips(tmp_path):
     src = _make(tmp_path, "A_RTSX", OLD_DAY)
-    zip_path = upload.compress_to_zip(src)
+    zst_path = upload.compress_to_zst(src)
     good = hashlib.sha256(PAYLOAD).hexdigest()
-    assert upload.zip_matches_source(zip_path, src.name, good)
-    assert not upload.zip_matches_source(zip_path, src.name, hashlib.sha256(b"other").hexdigest())
-    zip_path.write_bytes(zip_path.read_bytes()[:-50])  # truncated archive
-    assert not upload.zip_matches_source(zip_path, src.name, good)
+    original = zst_path.read_bytes()
+    assert upload.zst_matches_source(zst_path, good)
+    assert not upload.zst_matches_source(zst_path, hashlib.sha256(b"other").hexdigest())
+
+    zst_path.write_bytes(original[:-50])  # truncated archive
+    assert not upload.zst_matches_source(zst_path, good)
+
+    flipped = bytearray(original)
+    flipped[len(flipped) // 2] ^= 0xFF  # one damaged byte in the middle
+    zst_path.write_bytes(bytes(flipped))
+    assert not upload.zst_matches_source(zst_path, good)

@@ -3,10 +3,15 @@
 For every `<out_dir>/<symbol>/<date>.jsonl` whose trading day has already
 closed, one file at a time:
 
-  1. compress it to `<date>.jsonl.zip` -- a single-member ZIP, DEFLATE level 9.
-     ZIP is the strongest format that Windows, macOS and Linux all open out of
-     the box, with no extra software (xz/7z/zstd compress a few percent better
-     but need one);
+  1. compress it to `<date>.jsonl.zst` -- zstd level 9 with a content checksum
+     (~27x smaller on this data, ~95 MB/s on the 1-vCPU server). zstd rather
+     than zip/gzip/bzip2 because Yandex Disk answers an upload of those only
+     after processing the archive, ~0.27 s per MB of *uncompressed* content
+     (measured: 280 MB -> 76 s, a day's files -> hours), while a zstd upload is
+     answered in about a second. Higher levels cost far more CPU for little
+     gain (level 15: 28x at 16 MB/s; level 19: 33x at 1 MB/s). Read the files
+     with the `zstd` CLI, Python 3.14's `compression.zstd`, or the `zstandard`
+     package;
   2. check the archive round-trips to byte-identical content (sha256);
   3. upload the archive -- only the compressed file ever goes to Yandex Disk;
   4. read the file's metadata back from Yandex Disk and require its size and
@@ -19,31 +24,29 @@ it is still open for writing.
 
 Only allowed during the assumed exchange-closed window (`schedule.py`) --
 a file from a closed day can't still be growing, but that window is also when
-the CPU time for compressing is free. Needs the sibling `y_disk` package
-installed separately (not a formal dependency of this package, since it's an
-unpublished local project, not something on PyPI).
+the CPU time for compressing is free. Needs Python 3.14+ (stdlib
+`compression.zstd`) and the sibling `y_disk` package installed separately (not
+a formal dependency of this package, since it's an unpublished local project,
+not something on PyPI).
 """
 from __future__ import annotations
 
 import hashlib
+import shutil
 import time
-import zipfile
+from compression import zstd
+from compression.zstd import CompressionParameter
 from dataclasses import dataclass
 from pathlib import Path
 
 from .schedule import CLOSE_END, CLOSE_START, is_exchange_closed, trading_date
 
-ZIP_LEVEL = 9
+ZSTD_OPTIONS = {CompressionParameter.compression_level: 9, CompressionParameter.checksum_flag: 1}
 CHUNK_SIZE = 1 << 20
 MIN_AGE_S = 600  # skip a file modified in the last 10 minutes -- it may not be done growing
 UPLOAD_ATTEMPTS = 3
 VERIFY_POLLS = 12  # Yandex Disk can take a moment to publish a fresh file's checksums
 VERIFY_POLL_S = 5.0
-# Yandex Disk answers an upload only after it has processed the archive, which takes
-# ~0.3 s per MB of *uncompressed* content (measured: 280 MB -> 79 s, 562 MB -> 146 s, for
-# archives of only 10-19 MB) -- so the client's default 60 s read timeout fails on any day
-# file over ~230 MB. 30 min covers files of several GB.
-UPLOAD_TIMEOUT_S = 1800.0
 
 
 class UploadFailed(RuntimeError):
@@ -69,56 +72,53 @@ def file_digests(path: str | Path) -> Digests:
     return Digests(size, md5.hexdigest(), sha256.hexdigest())
 
 
-def compress_to_zip(src: Path) -> Path:
-    """`<date>.jsonl` -> `<date>.jsonl.zip` next to it, written under a
+def compress_to_zst(src: Path) -> Path:
+    """`<date>.jsonl` -> `<date>.jsonl.zst` next to it, written under a
     `.part` name and renamed into place so a crash never leaves a
     truncated-but-complete-looking archive. Streams -- constant memory."""
-    zip_path = src.with_name(src.name + ".zip")
-    part = zip_path.with_name(zip_path.name + ".part")
+    zst_path = src.with_name(src.name + ".zst")
+    part = zst_path.with_name(zst_path.name + ".part")
     part.unlink(missing_ok=True)
     try:
-        with zipfile.ZipFile(part, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=ZIP_LEVEL) as zf:
-            zf.write(src, arcname=src.name)
-        part.replace(zip_path)
+        with open(src, "rb") as fin, zstd.open(part, "wb", options=ZSTD_OPTIONS) as fout:
+            shutil.copyfileobj(fin, fout, CHUNK_SIZE)
+        part.replace(zst_path)
     except BaseException:
         part.unlink(missing_ok=True)
         raise
-    return zip_path
+    return zst_path
 
 
-def zip_matches_source(zip_path: Path, member: str, expected_sha256: str) -> bool:
-    """True if `zip_path` holds exactly one member, `member`, whose
-    decompressed bytes hash to `expected_sha256`. Reading a member to the end
-    also makes `zipfile` check its CRC-32."""
+def zst_matches_source(zst_path: Path, expected_sha256: str) -> bool:
+    """True if `zst_path` decompresses cleanly -- its frame checksum is verified
+    on the way -- to bytes hashing to `expected_sha256`. A truncated or damaged
+    archive counts as a mismatch."""
     sha256 = hashlib.sha256()
     try:
-        with zipfile.ZipFile(zip_path) as zf:
-            if zf.namelist() != [member]:
-                return False
-            with zf.open(member) as f:
-                while chunk := f.read(CHUNK_SIZE):
-                    sha256.update(chunk)
-    except (zipfile.BadZipFile, OSError):
+        with zstd.open(zst_path, "rb") as f:
+            while chunk := f.read(CHUNK_SIZE):
+                sha256.update(chunk)
+    except (zstd.ZstdError, EOFError, OSError):
         return False
     return sha256.hexdigest() == expected_sha256
 
 
 def upload_verified(
     client,
-    zip_path: Path,
+    archive_path: Path,
     remote_path: str,
     digests: Digests,
     attempts: int = UPLOAD_ATTEMPTS,
     polls: int = VERIFY_POLLS,
     poll_s: float = VERIFY_POLL_S,
 ) -> bool:
-    """Upload `zip_path` (replacing any earlier upload at `remote_path`) and
+    """Upload `archive_path` (replacing any earlier upload at `remote_path`) and
     return True only once Yandex Disk reports the same size, md5 and -- when it
     reports one -- sha256. A missing md5 is never accepted as a match."""
     from y_disk import ResourceNotFoundError  # optional dependency, imported lazily
 
     for attempt in range(1, attempts + 1):
-        client.upload_file(str(zip_path), remote_path, overwrite=True)
+        client.upload_file(str(archive_path), remote_path, overwrite=True)
         for poll in range(polls):
             try:
                 meta = client.get_meta(remote_path)
@@ -145,13 +145,13 @@ def _process_file(client, src: Path, remote_path: str, upload_kwargs: dict) -> b
     True only if `src` was deleted -- i.e. a verified copy is safely remote."""
     stat_before = src.stat()
     source = file_digests(src)
-    zip_path = compress_to_zip(src)
+    zst_path = compress_to_zst(src)
     try:
-        if not zip_matches_source(zip_path, src.name, source.sha256):
+        if not zst_matches_source(zst_path, source.sha256):
             print(f"  FAILED {src}: archive does not round-trip to the original -- keeping it", flush=True)
             return False
-        archive = file_digests(zip_path)
-        if not upload_verified(client, zip_path, remote_path, archive, **upload_kwargs):
+        archive = file_digests(zst_path)
+        if not upload_verified(client, zst_path, remote_path, archive, **upload_kwargs):
             print(f"  FAILED {src}: remote copy could not be verified -- keeping it", flush=True)
             return False
         stat_after = src.stat()
@@ -166,7 +166,7 @@ def _process_file(client, src: Path, remote_path: str, upload_kwargs: dict) -> b
         )
         return True
     finally:
-        zip_path.unlink(missing_ok=True)  # derived; regenerated on the next run if needed
+        zst_path.unlink(missing_ok=True)  # derived; regenerated on the next run if needed
 
 
 def upload_closed_files(
@@ -185,7 +185,7 @@ def upload_closed_files(
     """Process every recorded `*.jsonl` file whose trading day has already
     closed -- i.e. every one except today's (`schedule.trading_date()`) and any
     modified within `min_age_s` -- as described in the module docstring, each
-    uploaded to `<remote_root>/<symbol>/<date>.jsonl.zip` (replacing any earlier
+    uploaded to `<remote_root>/<symbol>/<date>.jsonl.zst` (replacing any earlier
     upload of the same day in place, so reruns never pile up duplicates).
     Refuses to run outside the exchange-closed window unless `force=True`.
     `dry_run=True` only lists what would be done. `secrets_path` is the file
@@ -205,14 +205,14 @@ def upload_closed_files(
     if client is None and not dry_run:
         from y_disk import YandexDiskClient, load_token  # optional dependency, imported lazily
 
-        client = YandexDiskClient(load_token(token_name, secrets_path), timeout=UPLOAD_TIMEOUT_S)
+        client = YandexDiskClient(load_token(token_name, secrets_path))
     today = trading_date().isoformat()
     upload_kwargs = dict(attempts=upload_attempts, polls=verify_polls, poll_s=verify_poll_s)
 
     symbol_dirs = sorted(p for p in Path(out_dir).iterdir() if p.is_dir())
     if not dry_run:
         for symbol_dir in symbol_dirs:
-            for stale in symbol_dir.glob("*.jsonl.zip.part"):  # a previous run died mid-compress
+            for stale in symbol_dir.glob("*.jsonl.zst.part"):  # a previous run died mid-compress
                 stale.unlink()
 
     uploaded, failed = [], []
@@ -223,7 +223,7 @@ def upload_closed_files(
             if time.time() - f.stat().st_mtime < min_age_s:
                 print(f"skipping {f}: modified in the last {min_age_s:.0f}s", flush=True)
                 continue
-            remote_path = f"{remote_root}/{symbol_dir.name}/{f.name}.zip"
+            remote_path = f"{remote_root}/{symbol_dir.name}/{f.name}.zst"
             if dry_run:
                 print(f"[dry run] would compress, upload and delete {f} ({f.stat().st_size / 1e6:.1f} MB) -> {remote_path}", flush=True)
                 uploaded.append(remote_path)
