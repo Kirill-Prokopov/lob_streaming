@@ -205,6 +205,22 @@ def test_refuses_to_run_outside_the_closed_window_unless_forced(tmp_path, monkey
     assert len(_run(tmp_path, FakeClient(), force=True)) == 1
 
 
+def test_client_is_built_with_a_timeout_long_enough_for_yandex_to_process_big_archives(tmp_path, monkeypatch):
+    seen = {}
+
+    class SpyClient:
+        def __init__(self, token, timeout=None):
+            seen["timeout"] = timeout
+
+    monkeypatch.setattr("y_disk.YandexDiskClient", SpyClient)
+    monkeypatch.setattr("y_disk.load_token", lambda name, path: "token")
+    (tmp_path / "A_RTSX").mkdir()
+
+    upload_closed_files(tmp_path, "unused-secrets", force=True)  # builds the real-path client; nothing to upload
+
+    assert seen["timeout"] == upload.UPLOAD_TIMEOUT_S >= 600  # the library default (60 s) failed on 280+ MB days
+
+
 def test_zip_matches_source_rejects_wrong_content_and_damage(tmp_path):
     src = _make(tmp_path, "A_RTSX", OLD_DAY)
     zip_path = upload.compress_to_zip(src)

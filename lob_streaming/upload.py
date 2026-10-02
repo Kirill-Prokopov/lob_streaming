@@ -39,6 +39,11 @@ MIN_AGE_S = 600  # skip a file modified in the last 10 minutes -- it may not be 
 UPLOAD_ATTEMPTS = 3
 VERIFY_POLLS = 12  # Yandex Disk can take a moment to publish a fresh file's checksums
 VERIFY_POLL_S = 5.0
+# Yandex Disk answers an upload only after it has processed the archive, which takes
+# ~0.3 s per MB of *uncompressed* content (measured: 280 MB -> 79 s, 562 MB -> 146 s, for
+# archives of only 10-19 MB) -- so the client's default 60 s read timeout fails on any day
+# file over ~230 MB. 30 min covers files of several GB.
+UPLOAD_TIMEOUT_S = 1800.0
 
 
 class UploadFailed(RuntimeError):
@@ -200,7 +205,7 @@ def upload_closed_files(
     if client is None and not dry_run:
         from y_disk import YandexDiskClient, load_token  # optional dependency, imported lazily
 
-        client = YandexDiskClient(load_token(token_name, secrets_path))
+        client = YandexDiskClient(load_token(token_name, secrets_path), timeout=UPLOAD_TIMEOUT_S)
     today = trading_date().isoformat()
     upload_kwargs = dict(attempts=upload_attempts, polls=verify_polls, poll_s=verify_poll_s)
 
